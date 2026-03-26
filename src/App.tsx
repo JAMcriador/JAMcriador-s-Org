@@ -36,9 +36,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { BibleTopic, Favorite, UserSettings, User, JournalEntry, StudyPlan, StudyPlanDay } from './types';
 import { INITIAL_TOPICS } from './constants';
 
-const ai = new GoogleGenAI({
-  apiKey: import.meta.env.VITE_GEMINI_API_KEY
-}); : '') || '' });
+const ai = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'home' | 'temas' | 'favoritos' | 'config' | 'journal' | 'premium' | 'admin' | 'counselor' | 'bible'>('home');
