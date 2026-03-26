@@ -1,0 +1,113 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "name": { "type": "string", "description": "User's full name" },
+        "email": { "type": "string", "format": "email", "description": "User's email address" },
+        "role": { "type": "string", "enum": ["user", "admin"], "description": "User's role" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the user was created" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Topic": {
+      "title": "Bible Topic",
+      "description": "A biblical topic with verses and explanations",
+      "type": "object",
+      "properties": {
+        "tema": { "type": "string", "description": "The theme of the topic" },
+        "versiculo": { "type": "string", "description": "Main verse" },
+        "explicacao": { "type": "string", "description": "Explanation of the topic" },
+        "contexto": { "type": "string", "description": "Biblical context" },
+        "aplicacao": { "type": "string", "description": "Practical application" },
+        "devocional": { "type": "string", "description": "Daily devotional text" },
+        "oracao": { "type": "string", "description": "Model prayer" },
+        "perguntas": { "type": "array", "items": { "type": "string" }, "description": "Reflection questions" },
+        "tags": { "type": "array", "items": { "type": "string" }, "description": "Search tags" },
+        "isAiGenerated": { "type": "boolean", "description": "Whether the topic was AI generated" }
+      },
+      "required": ["tema", "versiculo"]
+    },
+    "Favorite": {
+      "title": "User Favorite",
+      "description": "A user's favorite topic or plan",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["topic", "plan"], "description": "Type of favorite" },
+        "contentId": { "type": "string", "description": "ID of the content" },
+        "title": { "type": "string", "description": "Title of the favorite" },
+        "subtitle": { "type": "string", "description": "Subtitle of the favorite" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When it was favorited" }
+      },
+      "required": ["type", "contentId", "title"]
+    },
+    "JournalEntry": {
+      "title": "Journal Entry",
+      "description": "A user's spiritual journal entry",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "description": "Type of entry" },
+        "content": { "type": "string", "description": "Content of the entry" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the entry was created" }
+      },
+      "required": ["content", "createdAt"]
+    },
+    "StudyPlan": {
+      "title": "Study Plan",
+      "description": "A spiritual study plan",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Plan title" },
+        "description": { "type": "string", "description": "Plan description" },
+        "category": { "type": "string", "description": "Plan category" },
+        "durationDays": { "type": "integer", "description": "Duration in days" },
+        "isPremium": { "type": "boolean", "description": "Whether the plan is premium" }
+      },
+      "required": ["title", "category"]
+    },
+    "StudyPlanDay": {
+      "title": "Study Plan Day",
+      "description": "A specific day in a study plan",
+      "type": "object",
+      "properties": {
+        "dayNumber": { "type": "integer", "description": "The day number" },
+        "title": { "type": "string", "description": "Day title" },
+        "versiculo": { "type": "string", "description": "Day's verse" },
+        "explicacao": { "type": "string", "description": "Day's explanation" },
+        "aplicacao": { "type": "string", "description": "Day's application" },
+        "pergunta": { "type": "string", "description": "Day's reflection question" },
+        "oracao": { "type": "string", "description": "Day's prayer" }
+      },
+      "required": ["dayNumber"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/users/{uid}/favorites/{favId}": {
+      "schema": "Favorite",
+      "description": "User favorites"
+    },
+    "/users/{uid}/journal_entries/{entryId}": {
+      "schema": "JournalEntry",
+      "description": "User journal entries"
+    },
+    "/topics/{topicId}": {
+      "schema": "Topic",
+      "description": "Bible topics"
+    },
+    "/study_plans/{planId}": {
+      "schema": "StudyPlan",
+      "description": "Study plans"
+    },
+    "/study_plans/{planId}/days/{dayId}": {
+      "schema": "StudyPlanDay",
+      "description": "Days for each study plan"
+    }
+  }
+}

@@ -35,7 +35,27 @@ import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
 import { BibleTopic, Favorite, UserSettings, User, JournalEntry, StudyPlan, StudyPlanDay } from './types';
 import { INITIAL_TOPICS } from './constants';
-const ai = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
+import { auth, db, loginWithGoogle, logout, handleFirestoreError, OperationType } from './firebase';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { 
+  collection, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  getDocs, 
+  query, 
+  where, 
+  onSnapshot, 
+  addDoc, 
+  deleteDoc, 
+  updateDoc, 
+  serverTimestamp, 
+  Timestamp,
+  orderBy,
+  limit
+} from 'firebase/firestore';
+
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'home' | 'temas' | 'favoritos' | 'config' | 'journal' | 'premium' | 'admin' | 'counselor' | 'bible'>('home');
   const [searchQuery, setSearchQuery] = useState('');
@@ -50,73 +70,115 @@ export default function App() {
   const [counselorResponse, setCounselorResponse] = useState<any>(null);
   const [topics, setTopics] = useState<BibleTopic[]>([]);
   const [favorites, setFavorites] = useState<Favorite[]>([]);
-  const [readDevotionals, setReadDevotionals] = useState<number[]>([]);
+  const [readDevotionals, setReadDevotionals] = useState<string[]>([]);
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([]);
   const [studyPlans, setStudyPlans] = useState<StudyPlan[]>([]);
   const [allUsers, setAllUsers] = useState<User[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [settings, setSettings] = useState<UserSettings>({
     language: 'simple',
     notifications: true,
     theme: 'light'
   });
 
-  // Load data
+  // Auth and Data Sync
   useEffect(() => {
-    const savedUser = localStorage.getItem('user');
-    if (savedUser) {
-      setUser(JSON.parse(savedUser));
-    }
+    // Real-time Study Plans
+    const unsubscribePlans = onSnapshot(collection(db, 'study_plans'), (snapshot) => {
+      setStudyPlans(snapshot.docs.map(doc => ({ id: doc.id as any, ...doc.data() } as StudyPlan)));
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'study_plans'));
 
-    const fetchData = async () => {
-      try {
-        const [topicsRes, favsRes, readRes, plansRes] = await Promise.all([
-          fetch('/api/topics'),
-          fetch('/api/favorites'),
-          fetch('/api/read-devotionals'),
-          fetch('/api/study-plans')
-        ]);
-        
-        const topicsData = await topicsRes.json();
-        const favsData = await favsRes.json();
-        const readData = await readRes.json();
-        const plansData = await plansRes.json();
-
-        // Always sync initial topics to ensure latest content (server handles update)
-        for (const topic of INITIAL_TOPICS) {
-          await fetch('/api/topics', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(topic)
-          });
+    const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // Get or create user profile
+        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+        if (userDoc.exists()) {
+          setUser(userDoc.data() as User);
+        } else {
+          const newUser: User = {
+            id: firebaseUser.uid as any,
+            name: firebaseUser.displayName || 'Usuário',
+            email: firebaseUser.email || '',
+            role: 'user',
+            created_at: new Date().toISOString()
+          };
+          await setDoc(doc(db, 'users', firebaseUser.uid), newUser);
+          setUser(newUser);
         }
-        
-        // Refresh after sync
-        const updatedRes = await fetch('/api/topics');
-        setTopics(await updatedRes.json());
-        
-        setFavorites(favsData);
-        setReadDevotionals(readData);
-        setStudyPlans(plansData);
+      } else {
+        setUser(null);
+      }
+      setIsAuthReady(true);
+    });
 
-        if (savedUser) {
-          const u = JSON.parse(savedUser);
-          const journalRes = await fetch(`/api/journal/${u.id}`);
-          setJournalEntries(await journalRes.json());
-          
-          if (u.role === 'admin') {
-            const usersRes = await fetch('/api/users');
-            setAllUsers(await usersRes.json());
+    // Real-time Topics
+    const unsubscribeTopics = onSnapshot(collection(db, 'topics'), (snapshot) => {
+      const topicsData = snapshot.docs.map(doc => ({ id: doc.id as any, ...doc.data() } as BibleTopic));
+      setTopics(topicsData.length > 0 ? topicsData : INITIAL_TOPICS);
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'topics'));
+
+    return () => {
+      unsubscribeAuth();
+      unsubscribeTopics();
+      unsubscribePlans();
+    };
+  }, []);
+
+  // Sync INITIAL_TOPICS if empty (Admin only)
+  useEffect(() => {
+    if (!user || user.role !== 'admin' || !isAuthReady) return;
+    
+    const syncInitialTopics = async () => {
+      try {
+        const snapshot = await getDocs(collection(db, 'topics'));
+        if (snapshot.empty) {
+          for (const topic of INITIAL_TOPICS) {
+            await addDoc(collection(db, 'topics'), { ...topic, is_ai_generated: false });
           }
         }
-      } catch (error) {
-        console.error("Error loading data:", error);
-        setTopics(INITIAL_TOPICS);
+      } catch (err) {
+        console.error("Sync error:", err);
       }
     };
-    fetchData();
-  }, []);
+    syncInitialTopics();
+  }, [user, isAuthReady]);
+
+  // User-specific data
+  useEffect(() => {
+    if (!user || !isAuthReady) return;
+
+    const unsubscribeFavs = onSnapshot(collection(db, 'users', user.id as any, 'favorites'), (snapshot) => {
+      setFavorites(snapshot.docs.map(doc => ({ id: doc.id as any, ...doc.data() } as Favorite)));
+    });
+
+    const unsubscribeJournal = onSnapshot(
+      query(collection(db, 'users', user.id as any, 'journal_entries'), orderBy('created_at', 'desc')), 
+      (snapshot) => {
+        setJournalEntries(snapshot.docs.map(doc => ({ id: doc.id as any, ...doc.data() } as JournalEntry)));
+      }
+    );
+
+    const unsubscribeRead = onSnapshot(collection(db, 'users', user.id as any, 'read_devotionals'), (snapshot) => {
+      setReadDevotionals(snapshot.docs.map(doc => doc.id));
+    });
+
+    let unsubscribeAllUsers: (() => void) | undefined;
+    if (user.role === 'admin') {
+      unsubscribeAllUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
+        setAllUsers(snapshot.docs.map(doc => doc.data() as User));
+      });
+    }
+
+    return () => {
+      unsubscribeFavs();
+      unsubscribeJournal();
+      unsubscribeRead();
+      if (unsubscribeAllUsers) unsubscribeAllUsers();
+    };
+  }, [user, isAuthReady]);
 
   const verseOfTheDay = useMemo(() => {
     const day = new Date().getDate();
@@ -133,6 +195,7 @@ export default function App() {
     if (!searchQuery.trim()) return;
 
     setIsLoading(true);
+    setErrorMessage(null);
     
     // Check local database first
     const localMatch = topics.find(t => 
@@ -147,6 +210,7 @@ export default function App() {
     } else {
       // Use AI to generate content
       try {
+        const ai = new GoogleGenAI({ apiKey: (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : '') || '' });
         const response = await ai.models.generateContent({
           model: "gemini-3-flash-preview",
           contents: `Gere um estudo bíblico prático sobre o tema: "${searchQuery}". O tom deve ser acolhedor e a linguagem deve ser ${settings.language === 'simple' ? 'muito simples e direta' : 'intermediária e reflexiva'}.
@@ -182,23 +246,21 @@ export default function App() {
         const aiTopic = JSON.parse(cleanJson) as BibleTopic;
         aiTopic.is_ai_generated = true;
 
-        // Save to DB
-        const saveRes = await fetch('/api/topics', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(aiTopic)
-        });
+        // Try to save to Firestore (background)
+        let savedTopic = { ...aiTopic, id: Date.now().toString() as any };
+        try {
+          const docRef = await addDoc(collection(db, 'topics'), aiTopic);
+          savedTopic = { ...aiTopic, id: docRef.id as any };
+        } catch (saveError) {
+          console.warn("Could not save AI topic to Firestore:", saveError);
+          // Still show it to the user even if save fails (e.g. permission denied)
+        }
         
-        if (!saveRes.ok) throw new Error('Failed to save topic');
-        
-        const savedTopic = await saveRes.json();
-        
-        setTopics(prev => [...prev, savedTopic]);
         setSelectedTopic(savedTopic);
         setView('results');
       } catch (error) {
         console.error("AI Error:", error);
-        alert("Desculpe, não conseguimos gerar esse estudo agora. Tente outro tema.");
+        setErrorMessage("Desculpe, não conseguimos gerar esse estudo agora. Tente outro tema.");
       } finally {
         setIsLoading(false);
       }
@@ -206,35 +268,29 @@ export default function App() {
   };
 
   const toggleFavorite = async (topic: BibleTopic) => {
+    if (!user) return;
     const existing = favorites.find(f => f.content_id === topic.id && f.type === 'topic');
+    const favsRef = collection(db, 'users', user.id as any, 'favorites');
+    
     if (existing) {
-      await fetch(`/api/favorites/${existing.id}`, { method: 'DELETE' });
-      setFavorites(prev => prev.filter(f => f.id !== existing.id));
+      await deleteDoc(doc(db, 'users', user.id as any, 'favorites', existing.id as any));
     } else {
-      const res = await fetch('/api/favorites', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'topic',
-          content_id: topic.id,
-          title: topic.tema,
-          subtitle: topic.versiculo
-        })
+      await addDoc(favsRef, {
+        type: 'topic',
+        content_id: topic.id,
+        title: topic.tema,
+        subtitle: topic.versiculo,
+        created_at: new Date().toISOString()
       });
-      const newFav = await res.json();
-      setFavorites(prev => [newFav, ...prev]);
     }
   };
 
-  const markAsRead = async (topicId: number) => {
-    if (readDevotionals.includes(topicId)) return;
+  const markAsRead = async (topicId: string) => {
+    if (!user || readDevotionals.includes(topicId)) return;
     try {
-      await fetch('/api/read-devotionals', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic_id: topicId })
+      await setDoc(doc(db, 'users', user.id as any, 'read_devotionals', topicId), {
+        read_at: serverTimestamp()
       });
-      setReadDevotionals(prev => [...prev, topicId]);
     } catch (e) {
       console.error(e);
     }
@@ -242,7 +298,9 @@ export default function App() {
 
   const askCounselor = async (question: string, type: 'counselor' | 'doubt' = 'counselor') => {
     setIsLoading(true);
+    setErrorMessage(null);
     try {
+      const ai = new GoogleGenAI({ apiKey: (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : '') || '' });
       const isDoubt = type === 'doubt';
       const prompt = isDoubt 
         ? `O usuário tem esta dúvida bíblica: "${question}". 
@@ -277,93 +335,55 @@ export default function App() {
       if (activeTab !== 'counselor') setActiveTab('counselor');
     } catch (error) {
       console.error("Counselor AI Error:", error);
-      alert("Desculpe, não conseguimos processar sua pergunta agora.");
+      setErrorMessage("Desculpe, não conseguimos processar sua pergunta agora.");
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleLogin = async (email: string, pass: string) => {
+  const handleLogin = async () => {
     setIsLoading(true);
+    setErrorMessage(null);
     try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password: pass })
-      });
-      if (res.ok) {
-        const u = await res.json();
-        setUser(u);
-        localStorage.setItem('user', JSON.stringify(u));
-        setView('main');
-        // Load journal
-        const journalRes = await fetch(`/api/journal/${u.id}`);
-        setJournalEntries(await journalRes.json());
-        
-        if (u.role === 'admin') {
-          const usersRes = await fetch('/api/users');
-          setAllUsers(await usersRes.json());
-        }
-      } else {
-        alert("Credenciais inválidas");
-      }
+      await loginWithGoogle();
+      setView('main');
     } catch (e) {
       console.error(e);
+      setErrorMessage("Erro ao entrar com Google. Tente novamente.");
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleRegister = async (name: string, email: string, pass: string) => {
-    setIsLoading(true);
+  const handleLogout = async () => {
     try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, password: pass })
-      });
-      if (res.ok) {
-        const u = await res.json();
-        setUser(u);
-        localStorage.setItem('user', JSON.stringify(u));
-        setView('main');
-      } else {
-        alert("Erro ao cadastrar");
-      }
+      await logout();
+      setJournalEntries([]);
+      setActiveTab('home');
+      setView('main');
     } catch (e) {
       console.error(e);
-    } finally {
-      setIsLoading(false);
+      setErrorMessage("Erro ao sair.");
     }
-  };
-
-  const handleLogout = () => {
-    setUser(null);
-    localStorage.removeItem('user');
-    setJournalEntries([]);
-    setActiveTab('home');
-    setView('main');
   };
 
   const addJournalEntry = async (type: 'reflection' | 'prayer' | 'thought', content: string) => {
     if (!user) return;
     try {
-      const res = await fetch('/api/journal', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: user.id, type, content })
+      await addDoc(collection(db, 'users', user.id as any, 'journal_entries'), {
+        type,
+        content,
+        created_at: new Date().toISOString()
       });
-      const entry = await res.json();
-      setJournalEntries([entry, ...journalEntries]);
     } catch (e) {
       console.error(e);
     }
   };
 
-  const deleteJournalEntry = async (id: number) => {
+  const deleteJournalEntry = async (id: string) => {
+    if (!user) return;
     try {
-      await fetch(`/api/journal/${id}`, { method: 'DELETE' });
-      setJournalEntries(journalEntries.filter(e => e.id !== id));
+      await deleteDoc(doc(db, 'users', user.id as any, 'journal_entries', id));
     } catch (e) {
       console.error(e);
     }
@@ -638,10 +658,15 @@ export default function App() {
                   key={plan.id}
                   whileTap={{ scale: 0.98 }}
                   onClick={async () => {
-                    const res = await fetch(`/api/study-plans/${plan.id}/days`);
-                    setSelectedPlanDays(await res.json());
-                    setSelectedPlan(plan);
-                    setView('plan-detail');
+                    try {
+                      const snapshot = await getDocs(collection(db, 'study_plans', plan.id as any, 'days'));
+                      const days = snapshot.docs.map(doc => doc.data());
+                      setSelectedPlanDays(days as any);
+                      setSelectedPlan(plan);
+                      setView('plan-detail');
+                    } catch (e) {
+                      console.error(e);
+                    }
                   }}
                   className={`p-5 rounded-3xl border shadow-sm flex items-center justify-between cursor-pointer transition-colors ${
                     settings.theme === 'dark' ? 'bg-dark-card border-white/5 hover:bg-white/5' : 'bg-white border-brand-gray hover:bg-stone-50'
@@ -668,15 +693,37 @@ export default function App() {
 
   const fetchBibleText = async (book: string, chapter: number) => {
     setIsLoading(true);
+    setErrorMessage(null);
     setBibleBook(book);
     setBibleChapter(chapter);
     try {
-      const res = await fetch(`/api/bible/read?book=${encodeURIComponent(book)}&chapter=${chapter}`);
-      const data = await res.json();
+      const ai = new GoogleGenAI({ apiKey: (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : '') || '' });
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Forneça o texto completo do capítulo ${chapter} do livro de ${book} na versão NVI (Nova Versão Internacional) em Português.
+        Formate a resposta como um JSON com um array de objetos, onde cada objeto tem 'verse' (número do versículo) e 'text' (texto do versículo).`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                verse: { type: Type.NUMBER },
+                text: { type: Type.STRING }
+              },
+              required: ["verse", "text"]
+            }
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || '[]');
       setBibleContent(data);
       setView('bible-reader');
     } catch (e) {
       console.error(e);
+      setErrorMessage("Desculpe, não conseguimos carregar o texto bíblico agora.");
     } finally {
       setIsLoading(false);
     }
@@ -1035,6 +1082,17 @@ export default function App() {
         </button>
       </form>
 
+      {errorMessage && (
+        <motion.div 
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="p-4 bg-red-50 border border-red-100 text-red-600 rounded-2xl text-sm flex items-center gap-2"
+        >
+          <div className="w-2 h-2 rounded-full bg-red-500" />
+          {errorMessage}
+        </motion.div>
+      )}
+
       <div className="space-y-4">
         <SectionHeader theme={settings.theme}>Destaques</SectionHeader>
         
@@ -1316,8 +1374,9 @@ export default function App() {
               <button 
                 onClick={(e) => {
                   e.stopPropagation();
-                  fetch(`/api/favorites/${fav.id}`, { method: 'DELETE' });
-                  setFavorites(prev => prev.filter(f => f.id !== fav.id));
+                  if (user) {
+                    deleteDoc(doc(db, 'users', user.id as any, 'favorites', fav.id as any));
+                  }
                 }}
                 className="text-brand-blue hover:scale-110 transition-transform"
               >
@@ -1497,7 +1556,7 @@ export default function App() {
             {view === 'results' ? renderResults() : 
              view === 'devotional' ? renderDevotional() :
              view === 'login' ? <LoginView handleLogin={handleLogin} isLoading={isLoading} settings={settings} setView={setView} /> :
-             view === 'register' ? <RegisterView handleRegister={handleRegister} isLoading={isLoading} settings={settings} setView={setView} /> :
+             view === 'register' ? <RegisterView handleLogin={handleLogin} isLoading={isLoading} settings={settings} setView={setView} /> :
              view === 'plan-detail' ? renderPremium() :
              view === 'bible-reader' ? renderBible() :
              activeTab === 'home' ? renderHome() :
@@ -1548,9 +1607,6 @@ const SectionHeader = ({ children, theme }: { children: React.ReactNode, theme: 
 );
 
 const LoginView = ({ handleLogin, isLoading, settings, setView }: any) => {
-  const [email, setEmail] = useState('');
-  const [pass, setPass] = useState('');
-
   return (
     <div className="space-y-8 py-10">
       <div className="text-center space-y-2">
@@ -1562,47 +1618,33 @@ const LoginView = ({ handleLogin, isLoading, settings, setView }: any) => {
       </div>
 
       <div className="space-y-4">
-        <input 
-          type="email" 
-          placeholder="Email" 
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className={`w-full p-4 rounded-2xl border focus:ring-2 focus:ring-brand-blue outline-none transition-all ${
-            settings.theme === 'dark' ? 'bg-dark-card border-white/5 text-dark-text' : 'bg-white border-brand-gray text-stone-800'
-          }`}
-        />
-        <input 
-          type="password" 
-          placeholder="Senha" 
-          value={pass}
-          onChange={(e) => setPass(e.target.value)}
-          className={`w-full p-4 rounded-2xl border focus:ring-2 focus:ring-brand-blue outline-none transition-all ${
-            settings.theme === 'dark' ? 'bg-dark-card border-white/5 text-dark-text' : 'bg-white border-brand-gray text-stone-800'
-          }`}
-        />
         <button 
-          onClick={() => handleLogin(email, pass)}
+          onClick={handleLogin}
           disabled={isLoading}
-          className="w-full py-4 bg-brand-blue text-white rounded-2xl font-bold shadow-lg shadow-brand-blue/20 flex items-center justify-center gap-2"
+          className="w-full py-4 bg-brand-blue text-white rounded-2xl font-bold shadow-lg shadow-brand-blue/20 flex items-center justify-center gap-3 transition-all active:scale-[0.98]"
         >
-          {isLoading ? <Loader2 className="animate-spin" /> : 'Entrar'}
+          {isLoading ? <Loader2 className="animate-spin" /> : (
+            <>
+              <svg className="w-5 h-5" viewBox="0 0 24 24">
+                <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/>
+                <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+              </svg>
+              Entrar com Google
+            </>
+          )}
         </button>
       </div>
 
       <div className="text-center space-y-4">
-        <button onClick={() => setView('register')} className="text-brand-blue font-bold text-sm">Criar uma nova conta</button>
-        <div className="h-px bg-stone-200 w-full" />
         <button onClick={() => setView('main')} className="text-stone-400 text-sm">Continuar como visitante</button>
       </div>
     </div>
   );
 };
 
-const RegisterView = ({ handleRegister, isLoading, settings, setView }: any) => {
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [pass, setPass] = useState('');
-
+const RegisterView = ({ handleLogin, isLoading, settings, setView }: any) => {
   return (
     <div className="space-y-8 py-10">
       <div className="text-center space-y-2">
@@ -1611,39 +1653,22 @@ const RegisterView = ({ handleRegister, isLoading, settings, setView }: any) => 
       </div>
 
       <div className="space-y-4">
-        <input 
-          type="text" 
-          placeholder="Nome Completo" 
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          className={`w-full p-4 rounded-2xl border focus:ring-2 focus:ring-brand-blue outline-none transition-all ${
-            settings.theme === 'dark' ? 'bg-dark-card border-white/5 text-dark-text' : 'bg-white border-brand-gray text-stone-800'
-          }`}
-        />
-        <input 
-          type="email" 
-          placeholder="Email" 
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className={`w-full p-4 rounded-2xl border focus:ring-2 focus:ring-brand-blue outline-none transition-all ${
-            settings.theme === 'dark' ? 'bg-dark-card border-white/5 text-dark-text' : 'bg-white border-brand-gray text-stone-800'
-          }`}
-        />
-        <input 
-          type="password" 
-          placeholder="Senha" 
-          value={pass}
-          onChange={(e) => setPass(e.target.value)}
-          className={`w-full p-4 rounded-2xl border focus:ring-2 focus:ring-brand-blue outline-none transition-all ${
-            settings.theme === 'dark' ? 'bg-dark-card border-white/5 text-dark-text' : 'bg-white border-brand-gray text-stone-800'
-          }`}
-        />
         <button 
-          onClick={() => handleRegister(name, email, pass)}
+          onClick={handleLogin}
           disabled={isLoading}
-          className="w-full py-4 bg-brand-blue text-white rounded-2xl font-bold shadow-lg shadow-brand-blue/20 flex items-center justify-center gap-2"
+          className="w-full py-4 bg-brand-blue text-white rounded-2xl font-bold shadow-lg shadow-brand-blue/20 flex items-center justify-center gap-3 transition-all active:scale-[0.98]"
         >
-          {isLoading ? <Loader2 className="animate-spin" /> : 'Cadastrar'}
+          {isLoading ? <Loader2 className="animate-spin" /> : (
+            <>
+              <svg className="w-5 h-5" viewBox="0 0 24 24">
+                <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/>
+                <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+              </svg>
+              Cadastrar com Google
+            </>
+          )}
         </button>
       </div>
 
