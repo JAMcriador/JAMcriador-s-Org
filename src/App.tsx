@@ -210,7 +210,9 @@ export default function App() {
     } else {
       // Use AI to generate content
       try {
-        const ai = new GoogleGenAI({ apiKey: (typeof process !== 'undefined' ? process.env.GEMINI_API_KEY : '') || '' });
+     const ai = new GoogleGenAI({
+  apiKey: import.meta.env.VITE_GEMINI_API_KEY
+});
         const response = await ai.models.generateContent({
           model: "gemini-3-flash-preview",
           contents: `Gere um estudo bíblico prático sobre o tema: "${searchQuery}". O tom deve ser acolhedor e a linguagem deve ser ${settings.language === 'simple' ? 'muito simples e direta' : 'intermediária e reflexiva'}.
